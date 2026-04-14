@@ -1,7 +1,7 @@
 import os
 
 # Replace with your actual file path
-file_path = r"C:\Users\user\example.xlsx"
+file_path = r"C:\Gilo\myrepo\test.xlsx"
 
 try:
     os.startfile(file_path)
