@@ -3,48 +3,69 @@ import pandas as pd
 
 def generate_signals(df):
     """
-    Generate trading signals.
+    Stateful trend/momentum strategy.
 
-    Signal:
-        1 = Buy / Long
-        0 = No position
+    signal:
+        1 = long BTC
+        0 = cash
+
+    Entry and exit conditions are deliberately
+    different to reduce excessive switching.
     """
 
     df = df.copy()
 
-    # Default: no position
     df["signal"] = 0
 
-    # -------------------------
-    # TREND CONDITION
-    # -------------------------
+    # Current portfolio state
+    in_position = False
 
-    bullish_trend = (
-        df["ema_50"] > df["ema_200"]
-    )
+    for i in range(len(df)):
 
-    # -------------------------
-    # MOMENTUM CONDITION
-    # -------------------------
+        ema50 = df.loc[i, "ema_50"]
+        ema200 = df.loc[i, "ema_200"]
+        rsi = df.loc[i, "rsi_14"]
 
-    momentum_condition = (
-        (df["rsi_14"] > 35) &
-        (df["rsi_14"] < 55)
-    )
+        # Skip rows where indicators aren't ready
+        if pd.isna(ema50) or pd.isna(ema200) or pd.isna(rsi):
+            continue
 
-    # -------------------------
-    # BUY CONDITION
-    # -------------------------
+        # =====================================
+        # ENTRY
+        # =====================================
 
-    buy_condition = (
-        bullish_trend &
-        momentum_condition
-    )
+        if not in_position:
 
-    df.loc[
-        buy_condition,
-        "signal"
-    ] = 1
+            bullish_trend = (
+                ema50 > ema200
+            )
+
+            momentum_ok = (
+                40 <= rsi <= 55
+            )
+
+            if bullish_trend and momentum_ok:
+                in_position = True
+
+        # =====================================
+        # EXIT
+        # =====================================
+
+        else:
+
+            trend_broken = (
+                ema50 < ema200
+            )
+
+            momentum_extended = (
+                rsi >= 70
+            )
+
+            if trend_broken or momentum_extended:
+                in_position = False
+
+        # Store portfolio state
+        df.loc[i, "signal"] = int(in_position)
 
     return df
 
@@ -55,6 +76,16 @@ if __name__ == "__main__":
         "data/BTC_USDT_indicators.csv",
         parse_dates=["timestamp"]
     )
+
+    # --------------------------------------
+    # DEVELOPMENT DATA ONLY
+    # --------------------------------------
+
+    df = df[
+        df["timestamp"] < "2026-01-01"
+    ].copy()
+
+    df = df.reset_index(drop=True)
 
     df = generate_signals(df)
 
@@ -68,7 +99,7 @@ if __name__ == "__main__":
     ]
 
     print(
-        "\nLatest strategy signals:\n"
+        "\nLatest DEVELOPMENT signals:\n"
     )
 
     print(
@@ -87,7 +118,21 @@ if __name__ == "__main__":
         .sort_index()
     )
 
+    # Count transitions
+    transitions = (
+        df["signal"]
+        .diff()
+        .abs()
+        .fillna(0)
+        .sum()
+    )
+
+    print(
+        f"\nSignal transitions: "
+        f"{int(transitions)}"
+    )
+
     df.to_csv(
-        "data/BTC_USDT_signals.csv",
+        "data/BTC_USDT_signals_dev.csv",
         index=False
     )

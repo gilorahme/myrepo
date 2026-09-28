@@ -24,7 +24,7 @@ def load_data():
     """Load BTC data containing our strategy signals."""
 
     df = pd.read_csv(
-        "data/BTC_USDT_signals.csv",
+        "data/BTC_USDT_signals_dev.csv",
         parse_dates=["timestamp"]
     )
 
