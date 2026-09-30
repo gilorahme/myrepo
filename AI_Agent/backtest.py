@@ -4,24 +4,22 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-
 INITIAL_CAPITAL = 1000.0
 
-# Assumptions for our first simulation.
-# We will replace these with actual exchange costs later.
-TRADING_FEE = 0.001       # 0.10%
-SLIPPAGE = 0.0005         # 0.05%
+TRADING_FEE = 0.001
+SLIPPAGE = 0.0005
 
-COST_PER_TRANSACTION = TRADING_FEE + SLIPPAGE
+ENTRY_COST = TRADING_FEE + SLIPPAGE
+EXIT_COST = TRADING_FEE + SLIPPAGE
 
 HOURS_PER_YEAR = 365.25 * 24
 
 
 def load_data():
-    """Load BTC data containing our strategy signals."""
+    """
+    Load development data containing:
+    OHLCV prices, indicators and strategy signals.
+    """
 
     df = pd.read_csv(
         "data/BTC_USDT_signals_dev.csv",
@@ -35,244 +33,209 @@ def load_data():
         .reset_index(drop=True)
     )
 
+    # Safety check
+    required_columns = [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "signal"
+    ]
+
+    missing_columns = [
+        col
+        for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns: "
+            f"{missing_columns}"
+        )
+
+    print(
+        f"Loaded {len(df):,} development candles."
+    )
+
+    print(
+        f"Period: "
+        f"{df['timestamp'].iloc[0]} "
+        f"→ "
+        f"{df['timestamp'].iloc[-1]}"
+    )
+
     return df
 
 
 def run_backtest(df):
-    """
-    Run a long/cash backtest.
-
-    Important:
-    The signal generated from candle T is applied
-    starting with candle T+1.
-
-    This prevents look-ahead bias.
-    """
 
     df = df.copy()
 
-    # --------------------------------------
-    # MARKET RETURN
-    # --------------------------------------
+    cash = INITIAL_CAPITAL
+    btc = 0.0
 
-    df["market_return"] = df["close"].pct_change()
+    in_position = False
 
-    # --------------------------------------
-    # POSITION
-    # --------------------------------------
-    # Shift by one candle:
-    #
-    # Signal at T
-    #     ↓
-    # Position at T+1
-    #
-    # This prevents the strategy from using
-    # information that was not yet available.
+    equity_history = []
+    trades = []
 
-    df["position"] = (
-        df["signal"]
-        .shift(1)
-        .fillna(0)
-        .astype(int)
+    entry_price = None
+    entry_time = None
+    entry_equity = None
+
+    # Signal from previous completed candle
+    previous_signal = 0
+
+    for i in range(1, len(df)):
+
+        row = df.iloc[i]
+
+        current_open = row["open"]
+
+        # =====================================
+        # ENTRY
+        # =====================================
+
+        if previous_signal == 1 and not in_position:
+
+            execution_price = (
+                current_open *
+                (1 + SLIPPAGE)
+            )
+
+            fee = (
+                cash *
+                TRADING_FEE
+            )
+
+            investable_cash = cash - fee
+
+            btc = (
+                investable_cash /
+                execution_price
+            )
+
+            entry_price = execution_price
+            entry_time = row["timestamp"]
+            entry_equity = cash
+
+            cash = 0.0
+            in_position = True
+
+        # =====================================
+        # EXIT
+        # =====================================
+
+        elif previous_signal == 0 and in_position:
+
+            execution_price = (
+                current_open *
+                (1 - SLIPPAGE)
+            )
+
+            gross_cash = (
+                btc *
+                execution_price
+            )
+
+            fee = (
+                gross_cash *
+                TRADING_FEE
+            )
+
+            cash = gross_cash - fee
+
+            trade_return = (
+                cash / entry_equity
+            ) - 1
+
+            trades.append({
+                "entry_time": entry_time,
+                "exit_time": row["timestamp"],
+                "entry_price": entry_price,
+                "exit_price": execution_price,
+                "net_return": trade_return
+            })
+
+            btc = 0.0
+            in_position = False
+
+        # =====================================
+        # PORTFOLIO VALUE
+        # =====================================
+
+        if in_position:
+
+            equity = (
+                btc *
+                row["close"]
+            )
+
+        else:
+
+            equity = cash
+
+        equity_history.append({
+            "timestamp": row["timestamp"],
+            "equity": equity
+        })
+
+        # Signal becomes actionable next candle
+        previous_signal = row["signal"]
+
+    equity_df = pd.DataFrame(
+        equity_history
     )
 
-    # --------------------------------------
-    # IDENTIFY TRANSACTIONS
-    # --------------------------------------
-
-    df["position_change"] = (
-        df["position"]
-        .diff()
-        .fillna(df["position"])
+    trades_df = pd.DataFrame(
+        trades
     )
 
-    # +1 = enter BTC
-    # -1 = exit BTC
-    #  0 = no transaction
-
-    df["transaction"] = (
-        df["position_change"]
-        .abs()
-    )
-
-    # --------------------------------------
-    # GROSS STRATEGY RETURN
-    # --------------------------------------
-
-    df["gross_strategy_return"] = (
-        df["position"] *
-        df["market_return"]
-    )
-
-    # --------------------------------------
-    # TRANSACTION COST
-    # --------------------------------------
-
-    df["transaction_cost"] = (
-        df["transaction"] *
-        COST_PER_TRANSACTION
-    )
-
-    # --------------------------------------
-    # NET STRATEGY RETURN
-    # --------------------------------------
-
-    df["strategy_return"] = (
-        df["gross_strategy_return"] -
-        df["transaction_cost"]
-    )
-
-    # --------------------------------------
-    # EQUITY CURVES
-    # --------------------------------------
-
-    df["strategy_equity"] = (
-        INITIAL_CAPITAL *
-        (1 + df["strategy_return"].fillna(0))
-        .cumprod()
-    )
-
-    df["buy_hold_equity"] = (
-        INITIAL_CAPITAL *
-        (1 + df["market_return"].fillna(0))
-        .cumprod()
-    )
-
-    return df
+    return equity_df, trades_df
 
 
-def calculate_max_drawdown(equity):
-    """Calculate maximum peak-to-trough drawdown."""
+def max_drawdown(equity):
 
-    running_max = equity.cummax()
+    peak = equity.cummax()
 
     drawdown = (
-        equity / running_max
+        equity / peak
     ) - 1
 
     return drawdown.min()
 
 
-def calculate_sharpe(returns):
-    """
-    Calculate annualized Sharpe ratio.
+def calculate_statistics(equity, trades):
 
-    Risk-free rate is set to zero for this
-    first baseline implementation.
-    """
+    final_value = equity["equity"].iloc[-1]
 
-    returns = returns.dropna()
-
-    if returns.std() == 0:
-        return np.nan
-
-    return (
-        returns.mean() /
-        returns.std()
-    ) * np.sqrt(HOURS_PER_YEAR)
-
-
-def extract_trades(df):
-    """
-    Extract completed long trades.
-
-    Entry occurs when position changes 0 -> 1.
-    Exit occurs when position changes 1 -> 0.
-    """
-
-    trades = []
-
-    entry_index = None
-
-    for i in range(len(df)):
-
-        change = df.iloc[i]["position_change"]
-
-        if change == 1:
-            entry_index = i
-
-        elif change == -1 and entry_index is not None:
-
-            entry = df.iloc[entry_index]
-            exit_ = df.iloc[i]
-
-            entry_price = entry["close"]
-            exit_price = exit_["close"]
-
-            gross_return = (
-                exit_price / entry_price
-            ) - 1
-
-            # Entry + exit transaction costs
-            net_return = (
-                (1 + gross_return) *
-                (1 - COST_PER_TRANSACTION) ** 2
-            ) - 1
-
-            trades.append({
-                "entry_time":
-                    entry["timestamp"],
-
-                "exit_time":
-                    exit_["timestamp"],
-
-                "entry_price":
-                    entry_price,
-
-                "exit_price":
-                    exit_price,
-
-                "gross_return":
-                    gross_return,
-
-                "net_return":
-                    net_return
-            })
-
-            entry_index = None
-
-    return pd.DataFrame(trades)
-
-
-def performance_report(df, trades):
-
-    strategy_final = (
-        df["strategy_equity"].iloc[-1]
-    )
-
-    hold_final = (
-        df["buy_hold_equity"].iloc[-1]
-    )
-
-    strategy_return = (
-        strategy_final /
+    total_return = (
+        final_value /
         INITIAL_CAPITAL - 1
     )
 
-    hold_return = (
-        hold_final /
-        INITIAL_CAPITAL - 1
+    dd = max_drawdown(
+        equity["equity"]
     )
 
-    strategy_dd = calculate_max_drawdown(
-        df["strategy_equity"]
+    hourly_returns = (
+        equity["equity"]
+        .pct_change()
+        .dropna()
     )
 
-    hold_dd = calculate_max_drawdown(
-        df["buy_hold_equity"]
-    )
+    if hourly_returns.std() > 0:
 
-    sharpe = calculate_sharpe(
-        df["strategy_return"]
-    )
+        sharpe = (
+            hourly_returns.mean() /
+            hourly_returns.std()
+        ) * np.sqrt(HOURS_PER_YEAR)
 
-    transactions = int(
-        df["transaction"].sum()
-    )
+    else:
 
-    estimated_cost = (
-        df["transaction_cost"].sum()
-    )
+        sharpe = np.nan
 
     if len(trades) > 0:
 
@@ -291,13 +254,13 @@ def performance_report(df, trades):
 
         avg_win = (
             winners["net_return"].mean()
-            if len(winners) > 0
+            if len(winners)
             else 0
         )
 
         avg_loss = (
             losers["net_return"].mean()
-            if len(losers) > 0
+            if len(losers)
             else 0
         )
 
@@ -322,18 +285,24 @@ def performance_report(df, trades):
         avg_loss = 0
         profit_factor = 0
 
-    print("\n")
-    print("=" * 55)
-    print("          AI TRADING AGENT — BACKTEST")
-    print("=" * 55)
+    return {
+        "final_value": final_value,
+        "return": total_return,
+        "max_drawdown": dd,
+        "sharpe": sharpe,
+        "trades": len(trades),
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": profit_factor
+    }
 
-    print(
-        f"Period:              "
-        f"{df['timestamp'].iloc[0]} "
-        f"→ {df['timestamp'].iloc[-1]}"
-    )
 
-    print("-" * 55)
+def print_report(stats):
+
+    print("\n" + "=" * 55)
+    print("       TRADING AGENT — EXECUTION BACKTEST")
+    print("=" * 55)
 
     print(
         f"Starting capital:     "
@@ -341,98 +310,58 @@ def performance_report(df, trades):
     )
 
     print(
-        f"Strategy final:       "
-        f"${strategy_final:,.2f}"
+        f"Final capital:        "
+        f"${stats['final_value']:,.2f}"
     )
 
     print(
-        f"Buy & Hold final:     "
-        f"${hold_final:,.2f}"
-    )
-
-    print("-" * 55)
-
-    print(
-        f"Strategy return:      "
-        f"{strategy_return:.2%}"
-    )
-
-    print(
-        f"Buy & Hold return:    "
-        f"{hold_return:.2%}"
+        f"Total return:         "
+        f"{stats['return']:.2%}"
     )
 
     print("-" * 55)
 
     print(
         f"Completed trades:     "
-        f"{len(trades)}"
-    )
-
-    print(
-        f"Transactions:         "
-        f"{transactions}"
+        f"{stats['trades']}"
     )
 
     print(
         f"Win rate:             "
-        f"{win_rate:.2%}"
+        f"{stats['win_rate']:.2%}"
     )
 
     print(
         f"Average winner:       "
-        f"{avg_win:.2%}"
+        f"{stats['avg_win']:.2%}"
     )
 
     print(
         f"Average loser:        "
-        f"{avg_loss:.2%}"
+        f"{stats['avg_loss']:.2%}"
     )
 
     print(
         f"Profit factor:        "
-        f"{profit_factor:.2f}"
+        f"{stats['profit_factor']:.2f}"
     )
 
     print("-" * 55)
 
     print(
-        f"Strategy max DD:      "
-        f"{strategy_dd:.2%}"
+        f"Maximum drawdown:     "
+        f"{stats['max_drawdown']:.2%}"
     )
 
     print(
-        f"Buy & Hold max DD:    "
-        f"{hold_dd:.2%}"
-    )
-
-    print(
-        f"Strategy Sharpe:      "
-        f"{sharpe:.2f}"
-    )
-
-    print("-" * 55)
-
-    print(
-        f"Cost assumption:      "
-        f"{COST_PER_TRANSACTION:.2%} "
-        f"per transaction"
-    )
-
-    print(
-        f"Accumulated cost*:    "
-        f"{estimated_cost:.2%}"
-    )
-
-    print(
-        "*Sum of modeled return deductions, "
-        "not literal dollars."
+        f"Sharpe ratio:         "
+        f"{stats['sharpe']:.2f}"
     )
 
     print("=" * 55)
 
 
-def plot_results(df):
+def plot_equity(equity):
 
     Path("results").mkdir(
         exist_ok=True
@@ -443,19 +372,20 @@ def plot_results(df):
     )
 
     plt.plot(
-        df["timestamp"],
-        df["strategy_equity"],
+        equity["timestamp"],
+        equity["equity"],
         label="Trading Strategy"
     )
 
-    plt.plot(
-        df["timestamp"],
-        df["buy_hold_equity"],
-        label="BTC Buy & Hold"
+    plt.axhline(
+        INITIAL_CAPITAL,
+        linestyle="--",
+        alpha=0.5,
+        label="Starting Capital"
     )
 
     plt.title(
-        "AI Trading Agent vs BTC Buy & Hold"
+        "Trading Agent — Development Equity"
     )
 
     plt.xlabel("Date")
@@ -467,7 +397,7 @@ def plot_results(df):
     plt.tight_layout()
 
     plt.savefig(
-        "results/equity_curve.png",
+        "results/development_equity.png",
         dpi=150
     )
 
@@ -478,27 +408,27 @@ if __name__ == "__main__":
 
     data = load_data()
 
-    results = run_backtest(data)
+    equity, trades = run_backtest(data)
 
-    trades = extract_trades(results)
+    stats = calculate_statistics(
+        equity,
+        trades
+    )
 
     Path("results").mkdir(
         exist_ok=True
     )
 
-    results.to_csv(
-        "results/backtest_results.csv",
+    equity.to_csv(
+        "results/development_equity.csv",
         index=False
     )
 
     trades.to_csv(
-        "results/trades.csv",
+        "results/development_trades.csv",
         index=False
     )
 
-    performance_report(
-        results,
-        trades
-    )
+    print_report(stats)
 
-    plot_results(results)
+    plot_equity(equity)
