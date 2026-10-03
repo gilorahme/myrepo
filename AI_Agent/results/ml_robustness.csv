@@ -1,0 +1,2 @@
+scenario,threshold,trades,final,return,win_rate,avg_trade,profit_factor,max_drawdown
+Normal,0.85,12,1139.5419393059124,0.1395419393059123,0.5,0.011749592955246163,2.103387129646725,-0.07071593382643981

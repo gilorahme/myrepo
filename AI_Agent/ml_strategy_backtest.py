@@ -363,6 +363,126 @@ def print_stats(
         f"{stats['max_drawdown']:.2%}"
     )
 
+def robustness_test(predictions, prices):
+
+    thresholds = [
+        0.65,
+        0.70,
+        0.75,
+        0.80,
+        0.85
+    ]
+
+    scenarios = [
+        ("Normal", 0.0010, 0.0005),
+        ("Stress 1.5x", 0.0015, 0.00075),
+        ("Stress 2x", 0.0020, 0.0010)
+    ]
+
+    results = []
+
+    global TRADING_FEE
+    global SLIPPAGE
+
+    original_fee = TRADING_FEE
+    original_slippage = SLIPPAGE
+
+    for (
+        scenario,
+        fee,
+        slippage
+    ) in scenarios:
+
+        TRADING_FEE = fee
+        SLIPPAGE = slippage
+
+        for threshold in thresholds:
+
+            final_capital, trades = (
+                simulate_threshold(
+                    predictions,
+                    prices,
+                    threshold
+                )
+            )
+
+            stats = calculate_stats(
+                final_capital,
+                trades
+            )
+
+        if scenario == "Normal":
+            trades.to_csv(
+                f"results/"
+                f"ml_trades_{int(threshold * 100)}.csv",
+                index=False
+            )
+
+            results.append({
+
+                "scenario":
+                    scenario,
+
+                "threshold":
+                    threshold,
+
+                **stats
+            })
+
+    # Restore normal assumptions
+    TRADING_FEE = original_fee
+    SLIPPAGE = original_slippage
+
+    results_df = pd.DataFrame(results)
+
+    print("\n")
+    print("=" * 90)
+    print("ROBUSTNESS TEST")
+    print("=" * 90)
+
+    columns = [
+        "scenario",
+        "threshold",
+        "trades",
+        "return",
+        "win_rate",
+        "avg_trade",
+        "profit_factor",
+        "max_drawdown"
+    ]
+
+    print(
+        results_df[columns]
+        .to_string(
+            index=False,
+            formatters={
+                "threshold":
+                    "{:.0%}".format,
+
+                "return":
+                    "{:.2%}".format,
+
+                "win_rate":
+                    "{:.2%}".format,
+
+                "avg_trade":
+                    "{:.2%}".format,
+
+                "profit_factor":
+                    "{:.2f}".format,
+
+                "max_drawdown":
+                    "{:.2%}".format
+            }
+        )
+    )
+
+    results_df.to_csv(
+        "results/ml_robustness.csv",
+        index=False
+    )
+
+    return results_df
 
 if __name__ == "__main__":
 
@@ -377,6 +497,7 @@ if __name__ == "__main__":
         0.50,
         0.60,
         0.70,
+        0.75,
         0.80
     ]
 
@@ -437,4 +558,9 @@ if __name__ == "__main__":
         "results/"
         "ml_threshold_comparison.csv",
         index=False
+    )
+
+    robustness_test(
+        predictions,
+        prices
     )

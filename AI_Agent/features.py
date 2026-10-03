@@ -202,10 +202,10 @@ if __name__ == "__main__":
     # KEEP 2026 LOCKED
     # =====================================
 
-    df = df[
-        df["timestamp"] <
-        "2026-01-01"
-    ].copy()
+#   df = df[
+#       df["timestamp"] <
+#       "2026-01-01"
+#   ].copy()
 
     df = (
         df
