@@ -1,9 +1,8 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
+from features import DEVELOPMENT_END, normalize_time, validate_labels
 
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
 
 
 FEATURE_FILE = "data/BTC_ML_features.csv"
@@ -42,6 +41,10 @@ FEATURES = [
 
 
 def build_model():
+
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import LogisticRegression
 
     return Pipeline([
         (
@@ -87,14 +90,15 @@ def load_data():
 
 def prepare_holdout(features):
 
+    features = validate_labels(features)
     train = features[
-        features["timestamp"]
-        < "2026-01-01"
+        (features["timestamp"] < DEVELOPMENT_END)
+        & (features["label_end_time"] < DEVELOPMENT_END)
     ].copy()
 
     holdout = features[
         features["timestamp"]
-        >= "2026-01-01"
+        >= DEVELOPMENT_END
     ].copy()
 
     train = train.dropna(
@@ -113,6 +117,12 @@ def generate_predictions(
     holdout
 ):
 
+    train = validate_labels(train)
+    if train.empty or holdout.empty:
+        raise ValueError("Training and holdout rows are required.")
+    boundary = min(DEVELOPMENT_END, pd.to_datetime(holdout["timestamp"], utc=True).min())
+    if not (train["label_end_time"] < boundary).all():
+        raise ValueError("Training labels cross the holdout boundary.")
     model = build_model()
 
     X_train = train[FEATURES]
@@ -139,6 +149,9 @@ def simulate(
     prices
 ):
 
+    predictions = normalize_time(predictions)
+    prices = normalize_time(prices)
+
     price_lookup = (
         prices
         .set_index("timestamp")
@@ -154,7 +167,7 @@ def simulate(
 
         probability = row["probability"]
 
-        if probability < THRESHOLD:
+        if not np.isfinite(probability) or probability < THRESHOLD:
             continue
 
         signal_time = row["timestamp"]
@@ -291,7 +304,7 @@ def report(
     print("\n" + "=" * 65)
 
     print(
-        "     FINAL UNSEEN HOLDOUT — 2026"
+        "     PREVIOUSLY VIEWED HOLDOUT — 2026 (fixed diagnostic)"
     )
 
     print("=" * 65)
@@ -409,6 +422,7 @@ def report(
 
 if __name__ == "__main__":
 
+    Path("results").mkdir(parents=True, exist_ok=True)
     features, prices = load_data()
 
     train, holdout = (

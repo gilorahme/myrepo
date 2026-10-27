@@ -1,5 +1,15 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
+from features import DEVELOPMENT_END, normalize_time
+
+
+def development_only(predictions, prices):
+    predictions = normalize_time(predictions)
+    prices = normalize_time(prices)
+    # Exclude signals AND execution prices from the viewed holdout.
+    return (predictions[predictions["timestamp"] < DEVELOPMENT_END].copy(),
+            prices[prices["timestamp"] < DEVELOPMENT_END].copy())
 
 
 INITIAL_CAPITAL = 1000.0
@@ -49,13 +59,15 @@ def load_data():
         .reset_index(drop=True)
     )
 
-    return predictions, prices
+    return development_only(predictions, prices)
 
 
 def simulate_threshold(
     predictions,
     prices,
-    threshold
+    threshold,
+    trading_fee=None,
+    slippage=None
 ):
     """
     Simple non-overlapping strategy:
@@ -70,6 +82,9 @@ def simulate_threshold(
     No overlapping positions.
     """
 
+    predictions, prices = development_only(predictions, prices)
+    trading_fee = TRADING_FEE if trading_fee is None else trading_fee
+    slippage = SLIPPAGE if slippage is None else slippage
     capital = INITIAL_CAPITAL
 
     trades = []
@@ -87,7 +102,7 @@ def simulate_threshold(
 
         probability = row["probability"]
 
-        if probability < threshold:
+        if not np.isfinite(probability) or probability < threshold:
             continue
 
         # Prevent overlapping trades
@@ -138,18 +153,18 @@ def simulate_threshold(
 
         buy_price = (
             entry_open *
-            (1 + SLIPPAGE)
+            (1 + slippage)
         )
 
         sell_price = (
             exit_open *
-            (1 - SLIPPAGE)
+            (1 - slippage)
         )
 
         # Entry fee
         entry_fee = (
             capital *
-            TRADING_FEE
+            trading_fee
         )
 
         investable = (
@@ -170,7 +185,7 @@ def simulate_threshold(
         # Exit fee
         exit_fee = (
             gross_exit *
-            TRADING_FEE
+            trading_fee
         )
 
         new_capital = (
@@ -381,11 +396,7 @@ def robustness_test(predictions, prices):
 
     results = []
 
-    global TRADING_FEE
-    global SLIPPAGE
-
-    original_fee = TRADING_FEE
-    original_slippage = SLIPPAGE
+    Path("results").mkdir(parents=True, exist_ok=True)
 
     for (
         scenario,
@@ -393,16 +404,15 @@ def robustness_test(predictions, prices):
         slippage
     ) in scenarios:
 
-        TRADING_FEE = fee
-        SLIPPAGE = slippage
-
         for threshold in thresholds:
 
             final_capital, trades = (
                 simulate_threshold(
                     predictions,
                     prices,
-                    threshold
+                    threshold,
+                    trading_fee=fee,
+                    slippage=slippage
                 )
             )
 
@@ -411,12 +421,11 @@ def robustness_test(predictions, prices):
                 trades
             )
 
-        if scenario == "Normal":
-            trades.to_csv(
-                f"results/"
-                f"ml_trades_{int(threshold * 100)}.csv",
-                index=False
-            )
+            if scenario == "Normal":
+                trades.to_csv(
+                    f"results/ml_trades_{int(threshold * 100)}.csv",
+                    index=False
+                )
 
             results.append({
 
@@ -428,10 +437,6 @@ def robustness_test(predictions, prices):
 
                 **stats
             })
-
-    # Restore normal assumptions
-    TRADING_FEE = original_fee
-    SLIPPAGE = original_slippage
 
     results_df = pd.DataFrame(results)
 
@@ -486,6 +491,7 @@ def robustness_test(predictions, prices):
 
 if __name__ == "__main__":
 
+    Path("results").mkdir(parents=True, exist_ok=True)
     predictions, prices = (
         load_data()
     )

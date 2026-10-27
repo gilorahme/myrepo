@@ -1,5 +1,36 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
+LABEL_HOURS = 24
+DEVELOPMENT_END = pd.Timestamp("2026-01-01", tz="UTC")
+
+
+def normalize_time(df, hourly=False):
+    """Reject ambiguous time ordering; never silently repair missing candles."""
+    df = df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="raise")
+    times = df["timestamp"]
+    if times.isna().any() or times.duplicated().any() or not times.is_monotonic_increasing:
+        raise ValueError("Timestamps must be nonmissing, unique and increasing.")
+    if hourly and not times.diff().iloc[1:].eq(pd.Timedelta(hours=1)).all():
+        raise ValueError("Expected consecutive hourly candles; repair source gaps first.")
+    return df
+
+
+def validate_labels(df):
+    """Require regenerated label provenance instead of guessing from legacy CSVs."""
+    df = normalize_time(df)
+    if "label_end_time" not in df:
+        raise ValueError("Missing label_end_time: regenerate with features.py.")
+    df["label_end_time"] = pd.to_datetime(df["label_end_time"], utc=True)
+    known = df["target"].notna()
+    expected = df["timestamp"] + pd.Timedelta(hours=LABEL_HOURS)
+    if not df.loc[known, "label_end_time"].eq(expected[known]).all():
+        raise ValueError("Known labels must end exactly 24 hours after their feature row.")
+    if not df.loc[known, "target"].isin([0, 1]).all():
+        raise ValueError("Targets must be binary or missing.")
+    return df
 
 
 INPUT_FILE = "data/BTC_USDT.csv"
@@ -32,7 +63,7 @@ def calculate_rsi(series, period=14):
 
 def build_features(df):
 
-    df = df.copy()
+    df = normalize_time(df, hourly=True)
 
     # =====================================
     # RETURNS / MOMENTUM
@@ -165,7 +196,7 @@ def create_target(df):
     """
     Target:
 
-    Will BTC be at least 1% higher
+    Will BTC be more than 1% higher
     24 hours from now?
 
     IMPORTANT:
@@ -173,10 +204,11 @@ def create_target(df):
     the training label, never as an input.
     """
 
-    df = df.copy()
+    df = normalize_time(df, hourly=True)
+    df["label_end_time"] = df["timestamp"].shift(-LABEL_HOURS)
 
     df["future_close_24h"] = (
-        df["close"].shift(-24)
+        df["close"].shift(-LABEL_HOURS)
     )
 
     df["future_return_24h"] = (
@@ -186,7 +218,8 @@ def create_target(df):
 
     df["target"] = (
         df["future_return_24h"] > 0.01
-    ).astype(int)
+    ).astype("Int64")
+    df.loc[df["future_return_24h"].isna(), "target"] = pd.NA
 
     return df
 
@@ -198,14 +231,7 @@ if __name__ == "__main__":
         parse_dates=["timestamp"]
     )
 
-    # =====================================
-    # KEEP 2026 LOCKED
-    # =====================================
-
-#   df = df[
-#       df["timestamp"] <
-#       "2026-01-01"
-#   ].copy()
+    # Features are causal for all rows. Training consumers enforce label cutoffs.
 
     df = (
         df
@@ -217,15 +243,12 @@ if __name__ == "__main__":
 
     df = create_target(df)
 
-    # Last 24 rows do not have a complete
-    # future target and must be removed.
-
-    df = df[
-        df["future_close_24h"]
-        .notna()
-    ].copy()
-
-    df = df.dropna()
+    # Keep inference rows; unknown future outcomes stay missing.
+    feature_columns = [c for c in df.columns if c not in {
+        "future_close_24h", "future_return_24h", "label_end_time", "target"
+    }]
+    df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_columns)
+    Path(OUTPUT_FILE).parent.mkdir(parents=True, exist_ok=True)
 
     df.to_csv(
         OUTPUT_FILE,

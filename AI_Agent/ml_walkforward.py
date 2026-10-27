@@ -1,19 +1,8 @@
 import pandas as pd
 import numpy as np
+from pathlib import Path
+from features import DEVELOPMENT_END, validate_labels
 
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import HistGradientBoostingClassifier
-
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    precision_score,
-    recall_score,
-    accuracy_score,
-    brier_score_loss
-)
 
 
 DATA_FILE = "data/BTC_ML_features.csv"
@@ -57,6 +46,10 @@ def load_data():
         .reset_index(drop=True)
     )
 
+    df = validate_labels(df)
+    df = df[(df["timestamp"] < DEVELOPMENT_END) &
+            (df["label_end_time"] < DEVELOPMENT_END)].copy()
+
     df = df.dropna(
         subset=FEATURES + ["target"]
     )
@@ -73,6 +66,11 @@ def load_data():
 # ==========================================
 
 def build_models():
+
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.ensemble import HistGradientBoostingClassifier
 
     logistic = Pipeline([
         (
@@ -182,6 +180,11 @@ def calculate_metrics(
     probabilities
 ):
 
+    from sklearn.metrics import (
+        roc_auc_score, average_precision_score, precision_score,
+        recall_score, accuracy_score, brier_score_loss
+    )
+
     predictions = (
         probabilities >= 0.50
     ).astype(int)
@@ -238,6 +241,8 @@ def run_walkforward(
     model
 ):
 
+    df = validate_labels(df)
+    df = df.dropna(subset=FEATURES + ["target"])
     windows = (
         create_walkforward_windows(df)
     )
@@ -265,13 +270,25 @@ def run_walkforward(
         start=1
     ):
 
+        train_start, train_end, val_start, val_end = (
+            pd.Timestamp(t, tz="UTC") for t in
+            (train_start, train_end, val_start, val_end)
+        )
+        # Inclusive calendar ends become exclusive information cutoffs.
+        train_cutoff = min(train_end + pd.Timedelta(hours=1), val_start, DEVELOPMENT_END)
+        val_cutoff = min(val_end + pd.Timedelta(hours=1), DEVELOPMENT_END)
+
         train_mask = (
+            (df["label_end_time"] < train_cutoff)
+            &
             (df["timestamp"] >= train_start)
             &
             (df["timestamp"] <= train_end)
         )
 
         validation_mask = (
+            (df["label_end_time"] < val_cutoff)
+            &
             (df["timestamp"] >= val_start)
             &
             (df["timestamp"] <= val_end)
@@ -293,6 +310,9 @@ def run_walkforward(
             len(validation) == 0
         ):
             continue
+
+        if not train["label_end_time"].max() < validation["timestamp"].min():
+            raise ValueError("Training label horizon overlaps validation.")
 
         X_train = train[FEATURES]
         y_train = train["target"]
@@ -405,6 +425,9 @@ def run_walkforward(
             f"{metrics['recall']:.2%}"
         )
 
+    if not predictions_all:
+        raise ValueError("No usable walk-forward folds after temporal separation.")
+
     return (
         pd.DataFrame(results),
         pd.concat(
@@ -480,6 +503,7 @@ def probability_analysis(
 
 if __name__ == "__main__":
 
+    Path("results").mkdir(parents=True, exist_ok=True)
     df = load_data()
 
     models = build_models()
